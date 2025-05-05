@@ -6,6 +6,7 @@ import matplotlib.image as mpimg
 from scipy import signal
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import convolve
+import math
 
 PATCHED = True
 X_DERIVATIVE_IDX = 0
@@ -13,10 +14,9 @@ Y_DERIVATIVE_IDX = 1
 PATCH_SIZE = 25
 FRAME1_FILE_NAME = 'data/frame1.jpg'
 FRAME2_FILE_NAME = 'data/frame2.jpg'
-WINDOW_SIZE = 3
-EIGEN_THRESHOLD = 0.001
-CONDITION_THRESHOLD = 1000
 FRAME_SKIP = 3
+EDGE_FRAMES = True
+RHOMBUS = False
 LOAD_FLOWER_FRAMES = True
 FLOWER_FRAME1 = 'data/Ex2-data/Ex2-data/flower-i1.tif'
 FLOWER_FRAME2 = 'data/Ex2-data/Ex2-data/flower-i2.tif'
@@ -25,6 +25,54 @@ FY2 = 1
 FYFX = 2
 FXFT = 3
 FYFT = 4
+
+
+def soft_thresh(x, t, s=5):
+    return 1 / (1 + np.exp(-s * (x - t)))
+
+def rhombus_image(isize, x_shift, fat_flag, contrast):
+    # Set angles in degrees based on fat_flag
+    theta1 = 0 if fat_flag == 1 else 30
+    theta2 = 45
+
+    theta1 = np.deg2rad(theta1)
+    theta2 = np.deg2rad(theta2)
+
+    r = isize / 6
+
+    x, y = np.meshgrid(np.arange(1, isize + 1), np.arange(1, isize + 1))
+    x = x - isize / 2 - x_shift
+    y = y - isize / 2
+
+    # Warp coordinates
+    xW = np.sin(theta1) * x + np.cos(theta1) * y
+    yW = np.sin(theta2) * x + np.cos(theta2) * y
+
+    M = np.array([
+        [np.cos(theta1), np.sin(theta1)],
+        [np.cos(theta2), np.sin(theta2)]
+    ])
+    detM = np.abs(np.linalg.det(M))
+
+    val = np.maximum(np.abs(xW), np.abs(yW))
+    im = 1 - soft_thresh(val, r * detM, s=1)
+    return im * contrast
+
+def rhombus_movie(fat_flag, contrast, vx):
+    im1 = rhombus_image(128, 0, fat_flag, contrast)
+    im2 = rhombus_image(128, vx, fat_flag, contrast)
+    return im1, im2
+
+
+def edge_frames(vx, vy):
+
+    xx, yy = np.meshgrid(np.arange(1, 129), np.arange(1, 129))
+    im1 = (xx < 64).astype(float)
+    xx_shifted = xx - vx
+    yy_shifted = yy - vy
+    im2 = (xx_shifted < 64).astype(float)
+
+    return im1, im2
 
 
 def get_patch(image, patch_center):
@@ -43,12 +91,9 @@ def warp_image(img, tx, ty, mask):
     m = np.array([[1, 0, tx],
                     [0, 1, ty]], dtype=np.float32)
 
-    shifted = cv2.warpAffine(img, m, (img.shape[1], img.shape[0]))
     height, width = img.shape[:2]
-    if mask is None:
-        mask = np.ones((height, width), np.uint8)
-
-    warp_mask = cv2.warpAffine(mask, m, (width, height), flags=cv2.INTER_NEAREST)
+    shifted = cv2.warpAffine(img, m, (width, height))
+    warp_mask = cv2.warpAffine(mask, m, (width, height))
 
     return shifted, warp_mask
 
@@ -203,13 +248,17 @@ def get_patch_center(image):
 
 def blur_downsample(image, kernel_size=5, sigma=0.8):
 
-    g1d = cv2.getGaussianKernel(ksize=kernel_size, sigma=sigma)
-    kernel = g1d @ g1d.T
+    g1d = np.array([
+                    [0.0112972493575865, 0.0149145471310277, 0.0176194555564150, 0.0186260153162562, 0.0176194555564150, 0.0149145471310277, 0.0112972493575865],
+                    [0.0149145471310277, 0.0196900775651435, 0.0232610781617145, 0.0245899310977849, 0.0232610781617145, 0.0196900775651435, 0.0149145471310277],
+                    [0.0176194555564150, 0.0232610781617145, 0.0274797169008232, 0.0290495711540169, 0.0274797169008232, 0.0232610781617145, 0.0176194555564150],
+                    [0.0186260153162562, 0.0245899310977849, 0.0290495711540169, 0.0307091076402979, 0.0290495711540169, 0.0245899310977849, 0.0186260153162562],
+                    [0.0176194555564150, 0.0232610781617145, 0.0274797169008232, 0.0290495711540169, 0.0274797169008232, 0.0232610781617145, 0.0176194555564150],
+                    [0.0149145471310277, 0.0196900775651435, 0.0232610781617145, 0.0245899310977849, 0.0232610781617145, 0.0196900775651435, 0.0149145471310277],
+                    [0.0112972493575865, 0.0149145471310277, 0.0176194555564150, 0.0186260153162562, 0.0176194555564150, 0.0149145471310277, 0.0112972493575865]
+                    ])
 
-    if image.ndim == 3:
-        blurred = np.stack([cv2.filter2D(image[:, :, c], -1, kernel) for c in range(image.shape[2])], axis=2)
-    else:
-        blurred = cv2.filter2D(image, -1, kernel)
+    blurred = cv2.filter2D(image, -1, g1d)
     downsampled = blurred[::2, ::2] if image.ndim == 2 else blurred[::2, ::2, :]
 
     return downsampled
@@ -232,67 +281,93 @@ def analyze_patch(second_derivatives, lmda):
     b2 = -1 * second_derivatives[FYFT].sum()
     a_matrix = np.array([[a11, a12],
                          [a12, a22]])
-    b_matrix_t = np.array([[b1, b2]]).T
+    b_matrix = np.array([b1, b2])
+    b_matrix_t = b_matrix.T
 
     a_matrix_regularized = a_matrix + lmda * np.eye(2)
+    print(f'a_matrix_regularized\n'
+          f'{a_matrix_regularized}\n')
     a_m_r_inv = np.linalg.pinv(a_matrix_regularized)
     uv = a_m_r_inv @ b_matrix_t
+
+    print(f'uv: {uv}')
     return uv
 
 
-def lk_alg(i1, i2, lmda = 0.0, mask=None, v_initial=[0, 0], num_iterations=2):
+def lk_alg(i1, i2, mask, lmda, v_initial, num_iterations):
     accumulated_vector = v_initial
     previous_iteration_guess = [0, 0]
     i1x, i1y = single_image_derivative_plt(i1)
     height, width = i1.shape
-    mask_prev = mask if mask else np.ones((height, width))
+    mask_prev = mask
     for iter in range(num_iterations):
         print(f'iteration: {iter}')
         x_shift, y_shift = accumulated_vector
         print(f'x_shift: {x_shift}, y_shift: {y_shift}')
-        warped_image, warp_mask = warp_image(i2, x_shift, y_shift, mask)
+        warped_image, warp_mask = warp_image(i2, x_shift, y_shift, mask_prev)
         # warped_image, warp_mask = warp_matlab(i2, (x_shift, y_shift))
         new_mask = mask_prev * warp_mask
-        show_image(i1, 'i1')
-        show_image(warped_image, 'warped_image')
-        show_image(new_mask, 'new_mask')
         it = get_time_derivative_plt(i1, warped_image)
         i2x, i2y = single_image_derivative_plt(warped_image)
         ix = i1x + i2x
         iy = i1y + i2y
         second_derivatives = get_2nd_derivative(ix, iy, it)
-
-        ux, uy = analyze_patch(second_derivatives, lmda)
+        second_derivatives_masked = [der*new_mask for der in second_derivatives]
+        ux, uy = analyze_patch(second_derivatives_masked, lmda)
 
         print(f'u = ({ux}, {uy})')
 
-        accumulated_vector[0] += ux[0]
-        accumulated_vector[1] += uy[0]
+        accumulated_vector[0] += ux
+        accumulated_vector[1] += uy
 
         print(f'accumulated vector: {accumulated_vector}')
+
+        mask_prev = new_mask
 
     return accumulated_vector
 
 
-def full_lk_alg(i1, i2, lmda=0.001, mask=None, num_iterations=1):
+def get_mask(patch_center, image_height, image_width):
+    x_center, y_center = patch_center
+    mask = np.zeros((image_height, image_width))
+    half_window = PATCH_SIZE//2
+    mask[y_center - half_window:y_center + half_window + 1,
+            x_center - half_window:x_center + half_window + 1] = 1
+    return mask
+
+def full_lk_alg(i1, i2, lmda, num_iterations=10):
     d = [0, 0]
-    patch_center = get_patch_center(i1)
-    if PATCHED:
-        i1 = get_patch(i1, patch_center)
-        i2 = get_patch(i2, patch_center)
-    show_image(i1, 'frame1')
-    show_image(i2, 'frame2')
+    image_height, image_width = i1.shape
+    if not RHOMBUS:
+        patch_center = get_patch_center(i1)
+        mask = get_mask(patch_center, image_height, image_width)
+    else:
+        mask = np.ones((image_height, image_width))
     i1_downsampled = blur_downsample(i1, kernel_size=5)
     i2_downsampled = blur_downsample(i2, kernel_size=5)
+    mask_downsampled = blur_downsample(mask, kernel_size=5)
 
-    initial_guess = lk_alg(i1_downsampled, i2_downsampled, lmda, None, [0, 0], 1)
+    initial_guess = lk_alg(i1_downsampled,
+                           i2_downsampled,
+                           mask=mask_downsampled,
+                           lmda=lmda,
+                           v_initial=[0, 0],
+                           num_iterations=1)
     initial_guess = [2*p for p in initial_guess]
 
+    if RHOMBUS:
+        return initial_guess
     print(f'initial guess: {initial_guess}')
 
-    final_vector = lk_alg(i1, i2, lmda=lmda, mask=None, v_initial=initial_guess, num_iterations=num_iterations)
+    final_vector = lk_alg(i1, i2,
+                          mask=mask,
+                          lmda=lmda,
+                          v_initial=initial_guess,
+                          num_iterations=num_iterations)
 
     print(f'final vector: {final_vector}')
+
+    return final_vector
 
 
 def load_flower_frames():
@@ -300,12 +375,55 @@ def load_flower_frames():
     return frame1, frame2
 
 
+def find_va(theta1, theta2, movement=(1,0)):
+    magnitude1 = movement[0]*np.cos(np.deg2rad(90-theta1))
+    theta1_normal = 270 + theta1
+
+    magnitude2 = movement[1]*np.sin(np.deg2rad(90-theta2))
+    theta2_normal = 270 + theta2
+
+    theta1_normal_rad, theta2_normal_rad = np.deg2rad(theta1_normal), np.deg2rad(theta2_normal)
+    x1_normal = magnitude1*np.cos(theta1_normal_rad)
+    y1_normal = magnitude2*np.sin(theta1_normal_rad)
+    x2_normal = magnitude2*np.cos(theta2_normal_rad)
+    y2_normal = magnitude2*np.sin(theta2_normal_rad)
+
+    va = [np.mean([x1_normal, x2_normal]), np.mean([y1_normal, y2_normal])]
+    return va
+
+
+def draw_ioc(frame1, frame2):
+    ioc_vec = full_lk_alg(frame1, frame2, 0.01, 1)
+    return ioc_vec
+
+
+def draw_vector(image, vector):
+    height, width = image.shape
+    origin = (width // 2, height // 2)
+    end_point = (
+        int(origin[0] + vector[0]),
+        int(origin[1] - vector[1])
+    )
+    cv2.arrowedLine(image, origin, end_point, (255,0,0), thickness=2, tipLength=0.1)
+    return image
+
+
 def main():
-    if WINDOW_SIZE % 2 == 0:
-        print('window size needs to be odd')
-        exit(1)
+
     mode = sys.argv[1]
-    if LOAD_FLOWER_FRAMES:
+    lmda = 0.0
+    if RHOMBUS:
+        frame1, frame2 = rhombus_movie(1, 0.5, 1)
+        show_image(frame1, 'frame1')
+        show_image(frame2, 'frame2')
+        ioc_vec = draw_ioc(frame1, frame2)
+        print(ioc_vec)
+        exit()
+    elif EDGE_FRAMES:
+        print('edge frames')
+        frame1, frame2 = edge_frames(1, -1)
+        lmda = 0.1
+    elif LOAD_FLOWER_FRAMES:
         frame1, frame2 = load_flower_frames()
     elif mode == 'v':
         print("mode v")
@@ -313,7 +431,8 @@ def main():
     else:
         frame1, frame2 = load_images(FRAME1_FILE_NAME, FRAME2_FILE_NAME)
 
-    full_lk_alg(frame1, frame2)
+    motion_vector = full_lk_alg(frame1, frame2, lmda=lmda)
+    print(list([float(p) for p in motion_vector]))
 
 
 if __name__ == '__main__':
