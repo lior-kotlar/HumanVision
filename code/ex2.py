@@ -10,13 +10,21 @@ from scipy.ndimage import convolve
 PATCHED = True
 X_DERIVATIVE_IDX = 0
 Y_DERIVATIVE_IDX = 1
-PATCH_SIZE = 50
+PATCH_SIZE = 25
 FRAME1_FILE_NAME = 'data/frame1.jpg'
 FRAME2_FILE_NAME = 'data/frame2.jpg'
 WINDOW_SIZE = 3
 EIGEN_THRESHOLD = 0.001
 CONDITION_THRESHOLD = 1000
 FRAME_SKIP = 3
+LOAD_FLOWER_FRAMES = True
+FLOWER_FRAME1 = 'data/Ex2-data/Ex2-data/flower-i1.tif'
+FLOWER_FRAME2 = 'data/Ex2-data/Ex2-data/flower-i2.tif'
+FX2 = 0
+FY2 = 1
+FYFX = 2
+FXFT = 3
+FYFT = 4
 
 
 def get_patch(image, patch_center):
@@ -32,8 +40,8 @@ def compute_error_image(i_target, i_shifted):
 
 
 def warp_image(img, tx, ty, mask):
-    m = np.float32([[1, 0, tx],
-                    [0, 1, ty]])
+    m = np.array([[1, 0, tx],
+                    [0, 1, ty]], dtype=np.float32)
 
     shifted = cv2.warpAffine(img, m, (img.shape[1], img.shape[0]))
     height, width = img.shape[:2]
@@ -62,12 +70,12 @@ def warp_matlab(Im, v):
     coords = np.stack([(yy + v[1]).ravel(), (xx + v[0]).ravel()], axis=-1)
 
     # Interpolate
-    Iw = interpolator(coords).reshape(Im.shape)
+    Iw = interpolator(coords).reshape(Im.shape).astype(np.uint8)
 
     # Create warp mask (1 where not NaN, 0 where NaN)
     warpMask = ~np.isnan(Iw)
     Iw[~warpMask] = 0
-    warpMask = warpMask.astype(np.float32)
+    warpMask = warpMask.astype(np.uint8)
 
     return Iw, warpMask
 
@@ -94,14 +102,12 @@ def get_time_derivative(img1, img2):
 
 
 def get_time_derivative_plt(img1, img2):
-    filter_t1 = np.array([[-0.25, -0.25],
-                          [-0.25, -0.25]])
+    filter_t = np.array([[0.25, 0.25],
+                        [0.25, 0.25]])
 
-    filter_t2 = np.array([[0.25, 0.25],
-                          [0.25, 0.25]])
-    it1 = signal.convolve2d(img1, filter_t1, mode='same')
-    it2 = signal.convolve2d(img2, filter_t2, mode='same')
-    it = it1 + it2
+    it1 = signal.convolve2d(img1, filter_t, mode='same')
+    it2 = signal.convolve2d(img2, filter_t, mode='same')
+    it = it2 - it1
     return it
 
 
@@ -195,44 +201,7 @@ def get_patch_center(image):
     return coords[0] if coords else None
 
 
-def analyze_window(fx, fy, ft, lmda):
-    fx_flat = fx.flatten()
-    fy_flat = fy.flatten()
-    ft_flat = ft.flatten()
-    ft_vec = np.array([ft_flat]).T
-    at = np.vstack((fx_flat, fy_flat))
-    a = at.T
-    ata = np.matmul(at, a)
-    eigen_values = np.linalg.eig(ata).eigenvalues
-    if np.min(eigen_values) < EIGEN_THRESHOLD:
-        return None
-    cond_number = np.linalg.cond(ata)
-
-    if cond_number > CONDITION_THRESHOLD:
-        return None
-    regularization_matrix = ata + lmda * np.eye(2)
-    v = np.linalg.pinv(regularization_matrix) @ a.T @ ft_vec
-    return v
-
-
-def crop_window(ix, iy, it, mask, window_center):
-    full_image_height, full_image_width = it.shape
-    x_center, y_center = window_center
-    shul = WINDOW_SIZE // 2
-    if x_center < shul or x_center > full_image_width - shul - 1 or \
-            y_center < shul or y_center > full_image_height - shul - 1:
-        print('window out of bounds')
-        return None
-
-    ix_window = ix[y_center - shul: y_center + shul + 1, x_center - shul:x_center + shul + 1]
-    iy_window = iy[y_center - shul: y_center + shul + 1, x_center - shul:x_center + shul + 1]
-    it_window = it[y_center - shul: y_center + shul + 1, x_center - shul:x_center + shul + 1]
-    mask_window = mask[y_center - shul: y_center + shul + 1, x_center - shul: x_center + shul + 1]
-
-    return ix_window, iy_window, it_window, mask_window
-
-
-def blur_downsample(image, kernel_size=5, sigma=1.0):
+def blur_downsample(image, kernel_size=5, sigma=0.8):
 
     g1d = cv2.getGaussianKernel(ksize=kernel_size, sigma=sigma)
     kernel = g1d @ g1d.T
@@ -244,6 +213,31 @@ def blur_downsample(image, kernel_size=5, sigma=1.0):
     downsampled = blurred[::2, ::2] if image.ndim == 2 else blurred[::2, ::2, :]
 
     return downsampled
+
+
+def get_2nd_derivative(fx, fy, ft):
+    fx_2 = fx**2
+    fy_2 = fy**2
+    fx_fy = fx*fy
+    fx_ft = fx*ft
+    fy_ft = fy*ft
+    return fx_2, fy_2, fx_fy, fx_ft, fy_ft
+
+
+def analyze_patch(second_derivatives, lmda):
+    a11 = second_derivatives[FX2].sum()
+    a12 = second_derivatives[FYFX].sum()
+    a22 = second_derivatives[FY2].sum()
+    b1 = -1 * second_derivatives[FXFT].sum()
+    b2 = -1 * second_derivatives[FYFT].sum()
+    a_matrix = np.array([[a11, a12],
+                         [a12, a22]])
+    b_matrix_t = np.array([[b1, b2]]).T
+
+    a_matrix_regularized = a_matrix + lmda * np.eye(2)
+    a_m_r_inv = np.linalg.pinv(a_matrix_regularized)
+    uv = a_m_r_inv @ b_matrix_t
+    return uv
 
 
 def lk_alg(i1, i2, lmda = 0.0, mask=None, v_initial=[0, 0], num_iterations=2):
@@ -266,41 +260,30 @@ def lk_alg(i1, i2, lmda = 0.0, mask=None, v_initial=[0, 0], num_iterations=2):
         i2x, i2y = single_image_derivative_plt(warped_image)
         ix = i1x + i2x
         iy = i1y + i2y
-        velocity_vectors = []
-        shul = WINDOW_SIZE // 2
-        for x_window_center in range(shul, width - shul - 1):
-            for y_window_center in range(shul, height - shul - 1):
-                ix_window, iy_window, it_window, mask_window = crop_window(ix, iy, it, new_mask, (x_window_center,y_window_center))
-                mask_flat = mask_window.flatten().astype(np.uint8)
-                if np.any(mask_flat == 0):
-                    continue
-                v = analyze_window(ix_window, iy_window, it_window, lmda=lmda)
-                if v is not None:
-                    velocity_vectors.append(v)
+        second_derivatives = get_2nd_derivative(ix, iy, it)
 
-        ux = np.mean(velocity_vectors[:][0])
-        uy = np.mean(velocity_vectors[:][1])
+        ux, uy = analyze_patch(second_derivatives, lmda)
 
         print(f'u = ({ux}, {uy})')
 
-        previous_iteration_guess = [ux, uy]
-
-        accumulated_vector[1] += ux
-        accumulated_vector[0] += uy
+        accumulated_vector[0] += ux[0]
+        accumulated_vector[1] += uy[0]
 
         print(f'accumulated vector: {accumulated_vector}')
 
     return accumulated_vector
 
 
-def full_lk_alg(i1, i2, lmda=0.001, mask=None, num_iterations=5):
+def full_lk_alg(i1, i2, lmda=0.001, mask=None, num_iterations=1):
     d = [0, 0]
     patch_center = get_patch_center(i1)
     if PATCHED:
         i1 = get_patch(i1, patch_center)
         i2 = get_patch(i2, patch_center)
-    i1_downsampled = blur_downsample(i1, kernel_size=5, sigma=lmda)
-    i2_downsampled = blur_downsample(i2, kernel_size=5, sigma=lmda)
+    show_image(i1, 'frame1')
+    show_image(i2, 'frame2')
+    i1_downsampled = blur_downsample(i1, kernel_size=5)
+    i2_downsampled = blur_downsample(i2, kernel_size=5)
 
     initial_guess = lk_alg(i1_downsampled, i2_downsampled, lmda, None, [0, 0], 1)
     initial_guess = [2*p for p in initial_guess]
@@ -312,13 +295,19 @@ def full_lk_alg(i1, i2, lmda=0.001, mask=None, num_iterations=5):
     print(f'final vector: {final_vector}')
 
 
+def load_flower_frames():
+    frame1, frame2 = load_images(FLOWER_FRAME1, FLOWER_FRAME2)
+    return frame1, frame2
+
 
 def main():
     if WINDOW_SIZE % 2 == 0:
         print('window size needs to be odd')
         exit(1)
     mode = sys.argv[1]
-    if mode == 'v':
+    if LOAD_FLOWER_FRAMES:
+        frame1, frame2 = load_flower_frames()
+    elif mode == 'v':
         print("mode v")
         frame1, frame2 = extract_two_frames(sys.argv[2])
     else:
