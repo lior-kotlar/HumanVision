@@ -16,16 +16,6 @@ ky = np.array([[-0.5], [0.5]], dtype=np.float32)
 plot_save_directory = 'exercise 3/plots'
 
 def show_matlab(im1, sc=None):
-    """
-    Display an image in grayscale with aspect ratio preserved,
-    optionally with a given intensity scale.
-
-    Parameters:
-        im1 : ndarray
-            The image to display.
-        sc : tuple or list, optional
-            The intensity scale (vmin, vmax). If not provided, matplotlib auto-scales.
-    """
     plt.figure()
     if sc is not None:
         plt.imshow(im1, cmap='gray', vmin=sc[0], vmax=sc[1])
@@ -39,13 +29,12 @@ def show_image(img, title='title'):
     cv2.imshow(title, img)
     cv2.waitKey(0)
 
-
 def deriv2laplace(ix, iy):
     ix2 = convolve2d(ix, kx, mode='same')
     iy2 = convolve2d(iy, ky, mode='same')
     return ix2 + iy2
 
-def get_image_derivatives(image):
+def image_derivatives(image):
     image = image.astype(np.float32)
     ix = convolve2d(image, kx, mode='full')
     iy = convolve2d(image, ky, mode='full')
@@ -61,15 +50,6 @@ def get_image_derivatives(image):
     iy[:,-1] = 0
     return ix, iy
 
-def get_laplacian(img):
-    image = img.astype(np.float32)
-    ix, iy = get_image_derivatives(image)
-    ix, iy = ix, iy
-    d2x = convolve2d(ix, kx, mode='full')
-    d2y = convolve2d(iy, ky, mode='full')
-    laplacian = d2x + d2y
-    return laplacian
-
 def load_image_grayscale(image_path):
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE).astype(np.uint8)
     return image
@@ -79,29 +59,11 @@ def create_test_image(size=100, thickness=3):
     cv2.line(image, (0,0), (size-1, size-1), color=255, thickness=thickness)
     return image
 
-def load_and_show_image(image_path):
-    image = load_image_grayscale(image_path)
-    show_image(image)
-
-def laplacian_cv2(image):
-    return cv2.Laplacian(image, cv2.CV_64F, ksize=3)
-
-def laplacian_from_image(image, cv=False):
-    if cv:
-        laplacian = laplacian_cv2(image)
-    else:
-        laplacian = get_laplacian(image)
-    return laplacian
-
-def print_image_details(img):
-    print(f'Image shape: {img.shape}')
-    return
-
 def make_binary_image(image, threshold):
-    binary = np.where(np.abs(image) > threshold, 255, 0).astype(np.uint8)
+    binary = np.where(np.abs(image) > threshold, 255, 0)
     return binary
 
-def show_two_images(img1, img2, cmap='gray'):
+def show_two_images(img1, img2, title, cmap='gray'):
     fig, axs = plt.subplots(2, 1, figsize=(5, 10))
 
     axs[0].imshow(img1, cmap=cmap)
@@ -111,17 +73,11 @@ def show_two_images(img1, img2, cmap='gray'):
     axs[1].imshow(img2, cmap=cmap)
     axs[1].axis('off')
     axs[1].set_title('Image 2')
-
+    plot_path = os.path.join(plot_save_directory, f'{title}.jpg')
     plt.tight_layout()
+    plt.savefig(plot_path)
+    print(f'saved to {plot_path}')
     plt.show()
-
-def show_image_and_binary_laplacian(image, cv=False):
-    if len(image.shape) > 2:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    laplacian = laplacian_from_image(image, cv)
-    default_threshold = 10
-    binary_laplacian = make_binary_image(laplacian, threshold=default_threshold)
-    show_two_images(image, binary_laplacian)
 
 def get_image_log(image):
     image = image.astype(np.float32)
@@ -134,32 +90,11 @@ def calculate_norm(i1, i2):
 
 
 def soft_thresh(x, t, s=5):
-    """
-    A soft threshold function.
-    Parameters:
-        x : numpy.ndarray
-            Input array.
-        t : float
-            Threshold.
-        s : float
-            Softness parameter (default is 5).
-    Returns:
-        numpy.ndarray
-    """
     y = 1 / (1 + np.exp(-s * (x - t)))
     return 1 - y
 
 def two_squares(shadow_flag):
-    """
-    Generate a synthetic image of two squares, one potentially in shadow.
-    Parameters:
-        shadow_flag : int
-            If 1, apply soft shadow with broader spread.
-            If 0, apply tighter shadow.
-    Returns:
-        im : numpy.ndarray
-            The resulting synthetic image.
-    """
+
     R = np.ones((50, 50))
     R[29:40, 29:40] = 2  # MATLAB is 1-indexed; Python is 0-indexed
     R[9:20, 9:20] = 2
@@ -174,7 +109,6 @@ def two_squares(shadow_flag):
 
     im = R * L
     return im
-
 
 def inv_del2(im_size):
     isize = 2 * max(im_size)
@@ -201,9 +135,9 @@ def inv_del2(im_size):
     invK = convolve2d(invK, shift_kernel, mode='same')
     return invK
 
-def retinex_one_threshold(image, threshold):
+def do_retinex(image, threshold):
     log_image = get_image_log(image)
-    log_ix, log_iy = get_image_derivatives(log_image)
+    log_ix, log_iy = image_derivatives(log_image)
     log_der_norm = calculate_norm(log_ix, log_iy)
     mask = log_der_norm >= threshold
     filtered_ix = mask * log_ix
@@ -215,30 +149,18 @@ def retinex_one_threshold(image, threshold):
     illumination = image / (reflectance + 1e-8)
     return reflectance, illumination
 
-def simplified_retinex_multiple_thresholds(image, thresholds):
+def do_retinex_multiple_thresholds(image, thresholds):
     print(f'starting retinex')
-    log_image = get_image_log(image)
-    log_ix, log_iy = get_image_derivatives(log_image)
-    log_der_norm = calculate_norm(log_ix, log_iy)
     kl_by_reflectance = {}
     if len(thresholds) > 1:
         for t in thresholds:
-            reflectance, illumination = retinex_one_threshold(image, t)
+            reflectance, illumination = do_retinex(image, t)
             kl_by_reflectance[t] = (reflectance, illumination)
         return kl_by_reflectance
     if len(thresholds) == 1:
-        reflectance, illumination = retinex_one_threshold(image, thresholds[0])
+        reflectance, illumination = do_retinex(image, thresholds[0])
         return reflectance, illumination
 
-def laplacian_question():
-    path_custom_image = 'exercise 3/data/mouse.jpeg'
-    path_two_squares = 'exercise 3/ex3-files/simul_cont_squares.tif'
-    path_cross = 'exercise 3/ex3-files/cross.tif'
-    path_kofkaring = 'exercise 3/ex3-files/kofka_ring.tif'
-    grayscale_image = load_image_grayscale(path_two_squares)
-    laplacian = laplacian_from_image(grayscale_image, cv=False)
-    binary = make_binary_image(laplacian, threshold=10)
-    show_two_images(grayscale_image, laplacian)
 
 def plot_diagonal(image, title='Diagonal Intensity Profile'):
 
@@ -253,7 +175,6 @@ def plot_diagonal(image, title='Diagonal Intensity Profile'):
     plt.tight_layout()
     plt.show()
 
-
 def show_3_images_and_diagonal_overlay(images, titles, reflectance, title, cmap='gray'):
     if len(images) != 3 or len(titles) != 3:
         raise ValueError("Expected exactly 3 images and 3 titles.")
@@ -267,7 +188,6 @@ def show_3_images_and_diagonal_overlay(images, titles, reflectance, title, cmap=
         plt.axis('off')
 
     plt.subplot(2, 2, 4)
-    # plt.imshow(reflectance, cmap=cmap)
     diag = np.diagonal(reflectance)
     plt.plot(np.arange(len(diag)), diag, color='red', linewidth=2, label='Diagonal R[x,x]')
     plt.title('Reflectance with Diagonal Overlay')
@@ -278,15 +198,6 @@ def show_3_images_and_diagonal_overlay(images, titles, reflectance, title, cmap=
     plt.tight_layout()
     plt.savefig(plot_path)
     plt.show()
-
-def retinex_squares():
-    titles = ['original', 'reflectance', 'illumination']
-    grayscale_image = two_squares(1)
-    threshold = 0.07
-    reflectance, illumination = simplified_retinex_multiple_thresholds(grayscale_image, [threshold])
-    show_3_images_and_diagonal_overlay([grayscale_image, reflectance, illumination],
-                                       titles, reflectance, title=f'squares_t{str(threshold)}', cmap='gray')
-
 
 def show_image_with_dots(image, x1, y1, x2, y2, dot_radius=5,
                          cmap='gray', title='Image with Red Dots'):
@@ -299,50 +210,89 @@ def show_image_with_dots(image, x1, y1, x2, y2, dot_radius=5,
     plt.show()
     print('finished')
 
+def save_plot(image, filename, title, cmap='gray', vmin=None, vmax=None):
+    plt.figure(figsize=(6, 6))
+    if image.ndim == 2:
+        plt.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax)
+    else:
+        plt.imshow(image)
+    file_path = os.path.join(plot_save_directory, f'{filename}.jpeg')
+    plt.title(title)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(file_path, bbox_inches='tight', pad_inches=0.1)
+    plt.close()
+
+def q3():
+    path_two_squares = 'exercise 3/ex3-files/simul_cont_squares.tif'
+    grayscale_image = load_image_grayscale(path_two_squares)
+    ix, iy = image_derivatives(grayscale_image)
+    laplacian = deriv2laplace(ix, iy)
+    threshold = 15
+    binary = make_binary_image(laplacian, threshold=threshold)
+    show_two_images(grayscale_image, binary, f'simultaneous_contrast_t{str(threshold)}')
+
+def q4():
+    path_cross = 'exercise 3/ex3-files/cross.tif'
+    grayscale_image = load_image_grayscale(path_cross)
+    ix, iy = image_derivatives(grayscale_image)
+    laplacian = deriv2laplace(ix, iy)
+    threshold = 4.5
+    binary = make_binary_image(laplacian, threshold=threshold)
+    show_two_images(grayscale_image, binary, f'cross_t{str(threshold)}')
+
+def q5():
+    path_kofkaring = 'exercise 3/ex3-files/kofka_ring.tif'
+    grayscale_image = load_image_grayscale(path_kofkaring)
+    ix, iy = image_derivatives(grayscale_image)
+    laplacian = deriv2laplace(ix, iy)
+    threshold = 17
+    binary = make_binary_image(laplacian, threshold=threshold)
+    show_two_images(grayscale_image, binary, f'kofka_ring_t{str(threshold)}')
+
+def q8():
+    titles = ['original', 'reflectance', 'illumination']
+    flag = 2
+    grayscale_image = two_squares(flag)
+    threshold = 0.3
+    reflectance, illumination = do_retinex_multiple_thresholds(grayscale_image, [threshold])
+    show_3_images_and_diagonal_overlay([grayscale_image, reflectance, illumination],
+                                       titles, reflectance, title=f'squares{flag}_t{str(threshold)}', cmap='gray')
 
 def q9():
     mat = sio.loadmat('exercise 3/ex3-files/checkerShadow.mat')
     im1 = mat['im1']
     print(im1.shape)
-    show_matlab(im1)
     coordinates = mat['x1'], mat['y1'], mat['x2'], mat['y2']
     coordinates = [c.item() for c in coordinates]
     x1, y1, x2, y2 = coordinates
-    threshold = 0.07
-    print(f'intensity: a:{im1[y1, x1]}, b:{im1[y2, x2]}')
-    reflectance, illumination = simplified_retinex_multiple_thresholds(im1, [threshold])
-    show_3_images_and_diagonal_overlay([im1, reflectance, illumination],
-                                       ['original', 'reflectance', 'illumination'],
-                                       reflectance, title=f'checker_shadow_t{threshold}', cmap='gray')
+    threshold = 0.2
+    print(f'original image intensity: a:{im1[y1, x1]}, b:{im1[y2, x2]}')
+    reflectance, illumination = do_retinex_multiple_thresholds(im1, [threshold])
+    save_plot(reflectance, f'checkerShadow_t{str(threshold)}', f'reflectance_t{str(threshold)}')
+    print(f'reflectance image intensity: a:{reflectance[y1, x1]}, b:{reflectance[y2, x2]}')
 
 def q10():
     mat = sio.loadmat('exercise 3/ex3-files/runner.mat')
     im1 = mat['im1']
     print(im1.shape)
-    show_matlab(im1)
     thresholds = [0.05, 0.1, 0.15]
-    kl_by_reflectance = simplified_retinex_multiple_thresholds(im1, thresholds)
+    kl_by_reflectance = do_retinex_multiple_thresholds(im1, thresholds)
     for t in thresholds:
         reflectance, illumination = kl_by_reflectance[t]
-        show_3_images_and_diagonal_overlay([im1, reflectance, illumination],
-                                           ['original', 'reflectance', 'illumination'],
-                                           reflectance, title=f'runner_t{str(t)}', cmap='gray')
+        save_plot(reflectance, f'runner_t{str(t)}', f'reflectance_t{str(t)}')
 
 def q11():
     mat = sio.loadmat('exercise 3/ex3-files/couch.mat')
     im1 = mat['im1']
-    show_matlab(im1)
     thresholds = [0.01, 0.02, 0.03, 0.04]
-    kl_by_reflectance = simplified_retinex_multiple_thresholds(im1, thresholds)
+    kl_by_reflectance = do_retinex_multiple_thresholds(im1, thresholds)
     for t in thresholds:
         reflectance, illumination = kl_by_reflectance[t]
-        show_3_images_and_diagonal_overlay([im1, reflectance, illumination],
-                                           ['original', 'reflectance', 'illumination'],
-                                           reflectance, title=f'couch_t{str(t)}', cmap='gray')
+        save_plot(reflectance, f'couch_t{str(t)}', f'reflectance_t{str(t)}')
 
 def main():
     q11()
 
 if __name__ == "__main__":
     main()
-    cv2.destroyAllWindows()
